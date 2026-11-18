@@ -8,8 +8,9 @@
 『파이썬 증권 데이터 분석』 실습 저장소(`quant_실습`) 8장 자동매매의 틀(증권사
 연결, 장중 감시, 알림, 시간표)에서 출발해 새로 만들었습니다.
 
-- 결과 보고서: [results/](results/) (전략별 자동 생성)
-- 일지: [results/journal.md](results/journal.md) (관찰, 문제, 다음에 바꿀 것)
+- 결과 보고서와 일지는 각자 컴퓨터의 `results/`에 생기고, 깃에는 올리지 않습니다
+  (`.gitignore`). 매매 기록이 공개 저장소에 남지 않고, 포크해 간 사람은 빈 상태에서
+  자기 결과를 쌓습니다. 일지는 직접 쓴 기록이라 가끔 다른 곳에 백업해 두세요.
 
 ## 목표와 운영 방식
 
@@ -102,8 +103,8 @@ quant-trader/
 │   ├── close_reversal.py     # 장 마감 반전
 │   ├── vwap_trend.py         # VWAP 추세 (실험 후보)
 │   └── breakout_trailing.py  # 변동성 돌파 (예시)
-├── results/                  # git에 올리는 결과
-│   ├── mock_close_reversal.md, paper_close_reversal.md ...  (자동 생성, 직접 고치지 않음)
+├── results/                  # 결과 (git 추적 제외, 각자 컴퓨터에만)
+│   ├── mock_close_reversal.md, paper_close_reversal.md ...  (report.py가 자동 생성)
 │   └── journal.md            # 일지 (직접 작성)
 ├── data/                     # 실행하면 생김 (git 추적 제외)
 │   ├── mock_close_reversal/  # 전략별 장부: state.json, trades.csv
@@ -134,7 +135,6 @@ pip install -r requirements.txt
 |---|---|
 | `KIS_APP_KEY`, `KIS_APP_SECRET` | 한국투자증권 모의투자 앱키 (모의투자 계좌로 발급한 것) |
 | `KIS_ACCOUNT_NO` | 모의투자 계좌번호 `12345678-01` |
-| `KIS_TOKEN_FILE` | 비워 두면 `data/`에 저장. 다른 앱키의 토큰 파일을 지정하지 않음 |
 | `SLACK_BOT_TOKEN` | 슬랙 봇 토큰 |
 | `MOCK_SLACK_CHANNEL`, `PAPER_SLACK_CHANNEL` | `#seram-quant`, `#paper-trading` (공개 채널) |
 
@@ -148,6 +148,8 @@ python report.py          장 마감 후 results 보고서 갱신
 ```
 
 - 09:05 전에 켜면 됩니다. 장 마감 반전은 14:30부터 판단합니다.
+- 장 마감 후 `python report.py`로 `results/`에 전략별 보고서를 만들고, 관찰한 것은
+  `results/journal.md`에 적습니다. 처음에는 `results/` 폴더가 없으니 그대로 실행하면 생깁니다.
 - 장부는 파일에 저장되므로 껐다 켜도 이어집니다. `Ctrl+C`로 중단하면 모의투자
   계좌의 보유 종목은 자동으로 팔리지 않으니 직접 확인합니다.
 

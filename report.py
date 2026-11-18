@@ -3,7 +3,7 @@
     python report.py
 
 data/<장부>/trades.csv를 읽어서 results/<장부>.md를 새로 만든다.
-(data 폴더는 git에 올리지 않고, results 폴더의 보고서만 올린다)
+(data와 results 폴더는 모두 git에 올리지 않고 각자 컴퓨터에만 둔다)
 보고서는 매번 data에서 다시 만드므로 직접 고치지 않는다.
 관찰한 내용이나 메모는 results/journal.md에 따로 적는다.
 """

@@ -5,8 +5,8 @@
 .env 값
     KIS_APP_KEY, KIS_APP_SECRET   모의투자 앱키, 시크릿
     KIS_ACCOUNT_NO                모의투자 계좌번호 (12345678-01). 주문하는 전략이 있을 때만 필요
-    KIS_TOKEN_FILE                접근 토큰 저장 파일 (선택, 기본 data/.kis_token_mock.json)
-                                  토큰은 앱키마다 다르므로 다른 앱키의 토큰 파일을 지정하면 안 된다.
+    KIS_TOKEN_FILE                접근 토큰 저장 파일 (보통은 비워 둠, 기본 data/.kis_token_mock.json)
+                                  다른 앱키로 받은 토큰 파일이면 쓰지 않고 새로 발급받는다.
 
 연결 처리
     조회(GET)는 연결이 끊기면 새 연결로 다시 시도한다 (같은 조회를 다시 해도 안전).
@@ -74,8 +74,9 @@ class KISClient:
         if self.token_file.exists():
             try:
                 saved = json.loads(self.token_file.read_text(encoding='utf-8'))
+                # 이 앱키로 받은 토큰만 다시 쓴다 (표시가 없는 예전 형식이나 다른 앱키의 토큰은 버림)
                 if (saved.get('expires_at', 0) > time.time() + 600
-                        and saved.get('app_key_tail') in (None, self.app_key[-6:])):
+                        and saved.get('app_key_tail') == self.app_key[-6:]):
                     self._token = saved['access_token']
                     self._token_expires = saved['expires_at']
                     return self._token
