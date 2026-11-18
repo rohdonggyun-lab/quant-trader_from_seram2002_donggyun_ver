@@ -1,0 +1,287 @@
+"""매매 실행기: 여러 전략을 동시에 돌린다
+
+    python run.py           장중 실행 (09:05~15:15, 15:20 종료)
+    python run.py --check   지금 시점의 전략별 판단만 출력 (주문, 가상 매매 모두 안 함)
+
+전략 목록과 계좌(모의투자/가상) 설정은 config.py의 STRATEGIES에 있다.
+전략마다 장부, 슬랙 채널, 메시지 앞머리가 따로다.
+"""
+import sys
+import time
+import socket
+import importlib
+from datetime import datetime
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+ROOT = Path(__file__).resolve().parent
+load_dotenv(ROOT / '.env', override=True)        # 이 폴더의 .env만 읽는다
+
+import config                                     # noqa: E402
+from trader.kis_client import KISClient, KISError  # noqa: E402
+from trader.paper_broker import PaperBroker      # noqa: E402
+from trader.mock_broker import MockBroker        # noqa: E402
+from trader.notifier import Notifier             # noqa: E402
+
+LOCK_PORT = 47285       # 중복 실행 방지용
+ACCOUNT_LABEL = {'mock': '모의', 'paper': '가상'}
+UNIVERSE_CACHE = {}     # 같은 전략(모의투자와 그림자)은 감시 종목 목록을 같이 쓴다 {전략 클래스: (시각, 목록, 설명)}
+
+
+def hhmm(t):
+    return t.hour * 100 + t.minute
+
+
+def fmt(t):
+    return f'{t // 100}:{t % 100:02d}'
+
+
+class Quotes:
+    """현재가 조회. 같은 종목은 QUOTE_TTL초 안에 다시 조회하지 않고 여러 전략이 같이 쓴다."""
+
+    def __init__(self, client):
+        self.client = client
+        self.cache = {}
+
+    def get(self, code):
+        hit = self.cache.get(code)
+        if hit and time.time() - hit[0] < config.QUOTE_TTL:
+            return hit[1]
+        quote = self.client.get_price(code)
+        self.cache[code] = (time.time(), quote)
+        return quote
+
+
+class Runner:
+    """전략 하나를 돌리는 단위 (전략 + 장부 + 알림)"""
+
+    def __init__(self, spec, client, quotes):
+        module_name, class_name = spec['strategy'].rsplit('.', 1)
+        self.strategy = getattr(importlib.import_module('strategies.' + module_name), class_name)()
+        self.spec = spec
+        self.client, self.quotes = client, quotes
+        account = spec['account']
+        label = f'{ACCOUNT_LABEL[account]}·{self.strategy.name} {self.strategy.VERSION}'
+        self.note = Notifier(spec['channel'], label)
+        book = f'{account}_{module_name}'
+        if account == 'mock':
+            self.broker = MockBroker(book, spec['capital'], self.strategy.VERSION, client, self.note)
+        else:
+            self.broker = PaperBroker(book, spec['capital'], self.strategy.VERSION)
+        self.infos, self.no_data = {}, set()
+        self.symbols, self.universe_time = {}, 0.0
+        self.prices = {}
+        self.budget = 0
+        self.reported_hour = None
+        self.done = False
+        self.last_error = ''
+
+    # ------------------------------------------------------------ 준비
+    def start(self):
+        self.broker.start_day(datetime.now().strftime('%Y%m%d'))
+        equity = self.broker.equity({})
+        self.budget = int(self.spec['capital'] * self.spec['budget'])
+        start, end = self.strategy.buy_window
+        self.note.log('슬랙 알림 : ' + self.note.status())
+        self.note.send(f'시작 : 매수 판단 {fmt(start)}~{fmt(end)}, {fmt(config.EXIT_TIME)} 일괄 매도\n'
+                       f'자금 {self.spec["capital"]:,}원 (현재 {equity:,.0f}원), '
+                       f'종목당 {self.budget:,}원, 최대 {self.spec["max_positions"]}종목, '
+                       f'보유 {len(self.broker.positions)}종목')
+
+    def refresh_universe(self):
+        if self.symbols and time.time() - self.universe_time < config.UNIVERSE_REFRESH:
+            return
+        self.universe_time = time.time()
+        key = type(self.strategy).__name__
+        cached = UNIVERSE_CACHE.get(key)
+        if cached and time.time() - cached[0] < config.UNIVERSE_REFRESH:
+            symbols, source = cached[1], cached[2]
+        else:
+            try:
+                symbols, source = self.strategy.universe(self.client)
+                UNIVERSE_CACHE[key] = (time.time(), symbols, source)
+            except Exception as ex:
+                if self.symbols:
+                    self.note.log(f'감시 종목 갱신 실패, 이전 목록 유지 ({ex})')
+                    return
+                raise
+        if symbols and symbols != self.symbols:
+            self.symbols = symbols
+            names = [n for n, _ in symbols.values()]
+            self.note.log(f'감시 종목 {len(names)}개 ({source}) : '
+                          + ', '.join(names[:10]) + (' ...' if len(names) > 10 else ''))
+
+    def info(self, code, name):
+        if code not in self.infos:
+            info = self.strategy.prepare(self.client, code, datetime.now().strftime('%Y%m%d'))
+            if info is None:
+                if code not in self.no_data:
+                    self.no_data.add(code)
+                    self.note.log(f'{name}({code}) : 오늘 시세가 아직 없습니다.')
+                return None
+            self.infos[code] = info
+            desc = self.strategy.describe(info)
+            if desc:
+                self.note.log(f'{name}({code}) : {desc}')
+        return self.infos[code]
+
+    # ------------------------------------------------------------ 한 바퀴
+    def step(self, now):
+        t = hhmm(now)
+        start, end = self.strategy.buy_window
+        if t >= config.EXIT_TIME:
+            self.close_day()
+            return
+        if t < config.START_TIME:
+            return
+        in_window = start <= t < end
+
+        # 보유 종목: 장중 매도 조건이 있는 전략만 계속 확인
+        if self.strategy.intraday_exit:
+            for code in list(self.broker.positions):
+                p = self.broker.positions[code]
+                info = self.info(code, p.get('name', code)) or {}
+                quote = self.quotes.get(code)
+                self.prices[code] = quote['price']
+                self.broker.update_high(code, quote['price'])
+                reason = self.strategy.should_sell(info, p, quote)
+                if reason:
+                    self.sell(code, quote['price'], reason)
+
+        # 매수 판단
+        slots = self.spec['max_positions'] - len(self.broker.positions)
+        if in_window and slots > 0:
+            self.refresh_universe()
+            candidates = []
+            for code, (name, kind) in self.symbols.items():
+                if code in self.broker.positions:
+                    continue
+                if not self.strategy.allow_reentry and self.broker.traded_today(code):
+                    continue
+                info = self.info(code, name)
+                if info is None:
+                    continue
+                quote = self.quotes.get(code)
+                self.prices[code] = quote['price']
+                reason = self.strategy.should_buy(info, quote)
+                if reason:
+                    candidates.append((code, info, quote, reason))
+            for code, info, quote, reason in self.strategy.pick(candidates)[:slots]:
+                name, kind = self.symbols[code]
+                qty = self.broker.buy(code, name, kind, quote['price'], self.budget, reason)
+                if qty:
+                    p = self.broker.positions[code]
+                    self.note.send(f'매수 : {name}({code}) {qty:,}주, 체결가 {p["avg_price"]:,.0f}원 - {reason}')
+
+        # 매시 잔고 알림
+        if (self.broker.positions and now.minute >= config.REPORT_MINUTE
+                and self.reported_hour != now.hour):
+            self.reported_hour = now.hour
+            for code in self.broker.positions:
+                self.prices[code] = self.quotes.get(code)['price']
+            self.note.send(self.broker.summary(self.prices))
+
+    def sell(self, code, price, reason):
+        name = self.broker.positions[code].get('name', code)
+        profit, p = self.broker.sell(code, price, reason)
+        rate = profit / p['cost'] * 100 if p['cost'] else 0
+        self.note.send(f'매도 : {name}({code}) {p["qty"]:,}주, 매입가 {p["avg_price"]:,.0f} '
+                       f'→ 약 {price:,}원, 손익 {profit:+,}원 ({rate:+.2f}%) - {reason}')
+
+    def close_day(self):
+        """일괄 매도. 다 팔리면 정리 알림 후 done"""
+        for code in list(self.broker.positions):
+            quote = self.quotes.get(code)
+            self.prices[code] = quote['price']
+            self.sell(code, quote['price'], f'{fmt(config.EXIT_TIME)} 일괄 매도')
+        if not self.broker.positions and not self.done:
+            self.done = True
+            self.note.send('장 마감 정리\n' + self.broker.summary(self.prices))
+
+    def check(self):
+        """지금 시점의 판단만 출력"""
+        print(f'\n== {self.note.prefix.strip()} ({self.spec["account"]}) ==')
+        self.refresh_universe()
+        for code, (name, kind) in self.symbols.items():
+            info = self.info(code, name)
+            if info is None:
+                print(f'{name}({code}) : 오늘 시세 없음')
+                continue
+            quote = self.quotes.get(code)
+            reason = self.strategy.should_buy(info, quote)
+            extra = f', VWAP {quote["vwap"]:,.0f}' if quote.get('vwap') else ''
+            print(f'{name}({code}) : 현재가 {quote["price"]:,}, 시가 {quote["open"]:,}{extra}'
+                  f'  →  {"매수 신호: " + reason if reason else "대기"}')
+
+
+def main():
+    client = KISClient()
+    quotes = Quotes(client)
+    # 가상 장부를 먼저 돌린다: 가상은 바로 체결되고, 모의투자는 주문·체결 확인에 시간이 걸려서
+    # 그림자 장부가 모의투자와 같은 시점의 시세로 판단하게 하려는 것
+    specs = sorted(config.STRATEGIES, key=lambda s: s['account'] != 'paper')
+    runners = [Runner(spec, client, quotes) for spec in specs]
+
+    if '--check' in sys.argv:
+        for r in runners:
+            try:
+                r.check()
+            except KISError as ex:
+                print('실패 :', ex)
+        return
+
+    lock = socket.socket()                          # 같은 프로그램이 두 개 돌지 않게
+    try:
+        lock.bind(('127.0.0.1', LOCK_PORT))
+    except OSError:
+        print('이미 실행 중입니다. 이 창은 종료합니다.')
+        return
+
+    for r in runners:
+        for attempt in range(1, 6):                 # 시작 준비 실패 시 30초 간격으로 재시도
+            try:
+                r.start()
+                break
+            except (KISError, OSError) as ex:
+                if attempt == 5:                    # 이 전략만 빼고 나머지는 계속 돈다
+                    r.done = True
+                    r.note.send(f'시작 실패, 오늘은 이 전략을 돌리지 않습니다 : {ex}')
+                    break
+                r.note.log(f'시작 준비 실패 ({attempt}/5) : {ex} → 30초 뒤 다시 시도')
+                time.sleep(30)
+
+    while True:
+        now = datetime.now()
+        if now.weekday() >= 5:
+            print('주말에는 실행하지 않습니다.')
+            return
+        for r in runners:
+            if r.done:
+                continue
+            try:
+                r.step(now)
+                if r.last_error:
+                    r.note.send('오류에서 복구되어 계속 진행합니다.')
+                r.last_error = ''
+            except (KISError, OSError) as ex:       # 한 전략의 오류가 다른 전략을 멈추지 않게
+                if str(ex) != r.last_error:
+                    r.last_error = str(ex)
+                    r.note.send(f'오류 : {ex}')
+        if all(r.done for r in runners) or hhmm(datetime.now()) >= config.STOP_TIME:
+            for r in runners:
+                if not r.done and r.broker.positions:
+                    r.note.send('주의 : 종료 시각까지 팔지 못한 종목이 있습니다. 직접 확인하세요.')
+                r.note.send('종료합니다.')
+            return
+        time.sleep(config.LOOP_SLEEP)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except KISError as e:
+        print('시작 실패 :', e)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print('사용자가 중단했습니다. 장부(data/)는 그대로 남고, 모의투자 계좌의 보유 종목은 직접 확인하세요.')

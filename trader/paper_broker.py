@@ -1,5 +1,8 @@
 """가상 장부 (페이퍼 브로커)
 
+모의투자 계좌에 연결한 전략은 mock_broker.MockBroker가 이 클래스를 이어받아
+주문과 체결 부분만 실제 계좌로 바꾼다.
+
 실제 계좌에 주문하지 않고, 가상 현금과 보유 종목을 직접 관리한다.
 상태는 data/state.json에, 매매 기록은 data/trades.csv에 저장해서
 프로그램을 껐다 켜도 이어진다.
@@ -16,36 +19,41 @@ from pathlib import Path
 
 import config
 
-DATA_DIR = Path(__file__).resolve().parent.parent / 'data'
-STATE_FILE = DATA_DIR / 'state.json'
-TRADES_FILE = DATA_DIR / 'trades.csv'
+DATA_ROOT = Path(__file__).resolve().parent.parent / 'data'
 TRADE_FIELDS = ['time', 'side', 'code', 'name', 'qty', 'price', 'amount',
-                'fee', 'tax', 'profit', 'reason']
+                'fee', 'tax', 'profit', 'reason', 'version']
 
 
 class PaperBroker:
-    def __init__(self):
-        DATA_DIR.mkdir(exist_ok=True)
-        if STATE_FILE.exists():
-            self.state = json.loads(STATE_FILE.read_text(encoding='utf-8'))
+    account = 'paper'
+
+    def __init__(self, book, capital, version=''):
+        """book: 장부 이름 (data/<book>/에 저장), capital: 전략이 쓰는 자금, version: 전략 버전"""
+        self.book, self.capital, self.version = book, capital, version
+        data_dir = DATA_ROOT / book
+        data_dir.mkdir(parents=True, exist_ok=True)
+        self.state_file = data_dir / 'state.json'
+        self.trades_file = data_dir / 'trades.csv'
+        if self.state_file.exists():
+            self.state = json.loads(self.state_file.read_text(encoding='utf-8'))
         else:
-            self.state = {'cash': config.INITIAL_CASH, 'positions': {},
+            self.state = {'cash': capital, 'positions': {},
                           'date': '', 'today': {}}
 
     # ------------------------------------------------------------ 저장
     def _save(self):
-        tmp = STATE_FILE.with_suffix('.tmp')
+        tmp = self.state_file.with_suffix('.tmp')
         tmp.write_text(json.dumps(self.state, ensure_ascii=False, indent=2),
                        encoding='utf-8')
-        os.replace(tmp, STATE_FILE)            # 저장 중에 꺼져도 파일이 깨지지 않게
+        os.replace(tmp, self.state_file)            # 저장 중에 꺼져도 파일이 깨지지 않게
 
     def _record(self, row):
-        new = not TRADES_FILE.exists()
-        with open(TRADES_FILE, 'a', newline='', encoding='utf-8-sig') as f:
+        new = not self.trades_file.exists()
+        with open(self.trades_file, 'a', newline='', encoding='utf-8-sig') as f:
             w = csv.DictWriter(f, fieldnames=TRADE_FIELDS)
             if new:
                 w.writeheader()
-            w.writerow(row)
+            w.writerow({**row, 'version': self.version})
 
     # ------------------------------------------------------------ 하루 시작
     def start_day(self, today):
@@ -77,9 +85,11 @@ class PaperBroker:
                                for code, p in self.positions.items())
 
     # ------------------------------------------------------------ 가상 체결
-    def buy(self, code, price, budget, reason=''):
-        """budget 안에서 살 수 있는 만큼 가상 매수. 체결 수량을 돌려준다."""
-        name, _ = config.SYMBOLS[code]
+    def buy(self, code, name, kind, price, budget, reason=''):
+        """budget 안에서 살 수 있는 만큼 가상 매수. 체결 수량을 돌려준다.
+
+        kind: 'etf' 또는 'stock' (매도 세금 계산용)
+        """
         fill = price * (1 + config.SLIPPAGE)
         qty = int(min(budget, self.cash) // (fill * (1 + config.FEE_RATE)))
         if qty <= 0:
@@ -91,6 +101,7 @@ class PaperBroker:
             'qty': qty, 'avg_price': round(fill, 2),
             'cost': amount + fee,                 # 수수료까지 포함한 매수 금액
             'high': price,                        # 매수 후 최고가 (전략에서 사용)
+            'name': name, 'kind': kind,
             'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         }
         self.state['today'].setdefault('traded', []).append(code)
@@ -104,7 +115,7 @@ class PaperBroker:
     def sell(self, code, price, reason=''):
         """보유 수량 전부 가상 매도. 실현 손익(원)을 돌려준다."""
         p = self.positions.pop(code)
-        name, kind = config.SYMBOLS.get(code, (code, 'stock'))
+        name, kind = p.get('name', code), p.get('kind', 'stock')
         fill = price * (1 - config.SLIPPAGE)
         amount = round(fill * p['qty'])
         fee = round(amount * config.FEE_RATE)
@@ -136,10 +147,11 @@ class PaperBroker:
         """현재 가상 잔고와 오늘 성과를 문자열로"""
         eq = self.equity(prices)
         t = self.state['today']
-        lines = [f'가상 잔고 : 총자산 {eq:,.0f}원 (현금 {self.cash:,.0f}원), '
-                 f'처음 대비 {eq - config.INITIAL_CASH:+,.0f}원']
+        title = '가상 잔고' if self.account == 'paper' else '전략 잔고'
+        lines = [f'{title} : 총자산 {eq:,.0f}원 (현금 {self.cash:,.0f}원), '
+                 f'처음 대비 {eq - self.capital:+,.0f}원']
         for code, p in self.positions.items():
-            name = config.SYMBOLS.get(code, (code,))[0]
+            name = p.get('name', code)
             now = prices.get(code, p['avg_price'])
             pnl = now * p['qty'] - p['cost']
             lines.append(f'  {name}({code}) {p["qty"]:,}주, 매입가 {p["avg_price"]:,.0f}, '

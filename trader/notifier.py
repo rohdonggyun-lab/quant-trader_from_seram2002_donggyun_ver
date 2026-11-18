@@ -1,22 +1,29 @@
-"""알림: 화면 + 날짜별 로그 파일 + 슬랙(가상 매매 전용 채널)
+"""알림: 화면 + 날짜별 로그 파일 + 슬랙
+
+전략마다 채널과 메시지 앞머리를 따로 둔다.
+    모의투자 전략 → MOCK_SLACK_CHANNEL (예: #seram-quant), 앞머리 [모의·전략 v1]
+    가상 전략     → PAPER_SLACK_CHANNEL (예: #paper-trading), 앞머리 [가상·전략 v1]
 
 .env 값
     SLACK_BOT_TOKEN        슬랙 봇 토큰 (없으면 슬랙 없이 로그만 남김)
-    PAPER_SLACK_CHANNEL    가상 매매 알림 채널 (예: #paper-trading)
+    MOCK_SLACK_CHANNEL     모의투자 전략 알림 채널
+    PAPER_SLACK_CHANNEL    가상 전략 알림 채널
 """
 import os
 from datetime import datetime
 from pathlib import Path
 
 LOG_DIR = Path(__file__).resolve().parent.parent / 'data' / 'logs'
-PREFIX = '[가상] '
+DEFAULT_CHANNELS = {'MOCK_SLACK_CHANNEL': '#seram-quant',
+                    'PAPER_SLACK_CHANNEL': '#paper-trading'}
 
 
 class Notifier:
-    def __init__(self):
-        token = os.getenv('SLACK_BOT_TOKEN')
-        self.channel = os.getenv('PAPER_SLACK_CHANNEL') or '#paper-trading'
+    def __init__(self, channel_env='PAPER_SLACK_CHANNEL', label=''):
+        self.channel = os.getenv(channel_env) or DEFAULT_CHANNELS.get(channel_env, '#paper-trading')
+        self.prefix = f'[{label}] ' if label else ''
         self.slack = None
+        token = os.getenv('SLACK_BOT_TOKEN')
         if token:
             try:
                 from slack_sdk import WebClient
@@ -26,7 +33,7 @@ class Notifier:
 
     def log(self, message):
         """화면과 로그 파일에만 남긴다."""
-        line = datetime.now().strftime('[%m/%d %H:%M:%S] ') + str(message)
+        line = datetime.now().strftime('[%m/%d %H:%M:%S] ') + self.prefix + str(message)
         print(line, flush=True)
         try:
             LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -44,7 +51,7 @@ class Notifier:
         try:
             self.slack.chat_postMessage(
                 channel=self.channel,
-                text=PREFIX + datetime.now().strftime('[%m/%d %H:%M:%S] ') + message)
+                text=self.prefix + datetime.now().strftime('[%m/%d %H:%M:%S] ') + message)
         except Exception as ex:
             self.log(f'(슬랙 전송 실패: {ex})')
 
