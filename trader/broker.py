@@ -13,7 +13,8 @@ PaperBroker : 주문 없이 장부에만 기록한다. 그날 종가에 슬리�
 - 손익: 체결가 기준. 수수료와 세금은 config 값으로 추정 (모의투자 계좌가 실제로 떼는 비용과 다를 수 있음)
 
 장부는 data/<book>/state.json, 매매 기록은 data/<book>/trades.csv 에 저장해서 껐다 켜도 이어진다.
-현금은 전략에 배정한 자금(capital) 기준으로 따로 관리한다.
+가상 장부 현금은 전략에 배정한 자금(capital)으로 시작해 따로 관리한다.
+모의투자 장부 현금은 매일 시작할 때 계좌의 주문 가능 현금으로 맞춘다 (capital은 수익률 계산 기준).
 모의투자 계좌는 이 프로그램의 모의투자 전략 하나 전용으로 쓴다.
 """
 import csv
@@ -169,6 +170,13 @@ class MockBroker(Ledger):
         if others:
             self.note.warn('이 프로그램이 사지 않은 종목이 계좌에 있습니다 (건드리지 않음) : '
                            + ', '.join(others))
+        # 현금은 계좌 기준으로 맞춘다 (수수료·세금 추정치와 실제의 차이를 매일 바로잡음)
+        account_cash = self.client.get_buyable_cash()
+        gap = account_cash - self.state['cash']
+        if gap:
+            self.note.log(f'장부 현금을 계좌에 맞춤 : {self.state["cash"]:,.0f}원 → {account_cash:,.0f}원 ({gap:+,.0f}원)')
+            self.state['cash'] = account_cash
+            self.save()
 
     def buy(self, code, name, price, budget, reason=''):
         """최유리지정가 매수. 체결된 수량을 돌려준다 (0이면 못 삼)"""
