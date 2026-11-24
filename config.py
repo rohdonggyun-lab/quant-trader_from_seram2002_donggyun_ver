@@ -20,11 +20,11 @@
 # channel   : 슬랙 채널을 적어 둔 .env 항목 이름
 STRATEGIES = [
     {'name': '모멘텀 120일/10종목', 'lookback': 120, 'hold': 10, 'account': 'mock',
-     'book': 'momentum', 'capital': 10_000_000, 'channel': 'MOCK_SLACK_CHANNEL'},
+     'book': 'momentum', 'capital': 100_000_000, 'channel': 'MOCK_SLACK_CHANNEL'},
     {'name': '그림자 120일/10종목', 'lookback': 120, 'hold': 10, 'account': 'paper',
-     'book': 'paper_momentum_120_10', 'capital': 10_000_000, 'channel': 'PAPER_SLACK_CHANNEL'},
+     'book': 'paper_momentum_120_10', 'capital': 100_000_000, 'channel': 'PAPER_SLACK_CHANNEL'},
     {'name': '실험 250일/5종목', 'lookback': 250, 'hold': 5, 'account': 'paper',
-     'book': 'paper_momentum_250_5', 'capital': 10_000_000, 'channel': 'PAPER_SLACK_CHANNEL'},
+     'book': 'paper_momentum_250_5', 'capital': 100_000_000, 'channel': 'PAPER_SLACK_CHANNEL'},
 ]
 
 # ---------------------------------------------------------------- 체결 비용
