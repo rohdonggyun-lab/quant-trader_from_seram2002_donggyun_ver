@@ -87,6 +87,7 @@ class Ledger:
         fee = round(amount * config.FEE_RATE)
         t = now_str()
         self.state['cash'] -= amount + fee
+        self.last_fill = {'avg': avg, 'amount': amount + fee}
         if code in self.positions:                   # 같은 날 다시 사서 수량이 늘어난 경우
             p = self.positions[code]
             p['cost'] += amount + fee
@@ -108,6 +109,7 @@ class Ledger:
         cost = p['cost'] * qty / p['qty']
         profit = round(amount - fee - tax - cost)
         self.state['cash'] += amount - fee - tax
+        self.last_fill = {'avg': avg, 'amount': amount - fee - tax, 'rate': profit / cost if cost else 0.0}
         if qty >= p['qty']:
             self.positions.pop(code)
         else:                                        # 일부만 팔림: 남은 수량은 다음에 다시 판다
@@ -155,17 +157,17 @@ class MockBroker(Ledger):
             p = self.positions[code]
             if code not in held:                    # 장부에는 있는데 계좌에는 없음
                 self.positions.pop(code)
-                self.note.send(f'주의 : 장부의 {p.get("name", code)}({code}) {p["qty"]:,}주가 '
+                self.note.warn(f'장부의 {p.get("name", code)}({code}) {p["qty"]:,}주가 '
                                f'계좌에 없어 장부에서 지웠습니다. 체결 내역을 확인하세요.')
             elif held[code]['qty'] < p['qty']:
-                self.note.send(f'주의 : {p.get("name", code)}({code}) 장부 {p["qty"]:,}주, '
+                self.note.warn(f'{p.get("name", code)}({code}) 장부 {p["qty"]:,}주, '
                                f'계좌 {held[code]["qty"]:,}주. 계좌 수량으로 맞춥니다.')
                 p['cost'] = p['cost'] * held[code]['qty'] / p['qty']
                 p['qty'] = held[code]['qty']
         self.save()
         others = [f'{v["name"]}({c}) {v["qty"]:,}주' for c, v in held.items() if c not in self.positions]
         if others:
-            self.note.send('참고 : 이 프로그램이 사지 않은 종목이 계좌에 있습니다 (건드리지 않음) : '
+            self.note.warn('이 프로그램이 사지 않은 종목이 계좌에 있습니다 (건드리지 않음) : '
                            + ', '.join(others))
 
     def buy(self, code, name, price, budget, reason=''):
@@ -182,7 +184,7 @@ class MockBroker(Ledger):
         try:
             order = self.client.order('buy', code, qty, best=True)   # 최유리지정가
         except OrderUncertain as ex:
-            self.note.send(f'주의 : {name}({code}) 매수 주문 응답 없음, 잔고로 확인합니다 ({ex})')
+            self.note.warn(f'{name}({code}) 매수 주문 응답 없음, 잔고로 확인합니다 ({ex})')
         held_qty = before
         for _ in range(CHECK_TRIES):
             time.sleep(CHECK_GAP)
@@ -198,7 +200,7 @@ class MockBroker(Ledger):
             held_qty = (self._held(code) or {}).get('qty', 0)
         filled = held_qty - before
         if filled <= 0:
-            self.note.send(f'매수 미체결 : {name}({code}) {qty:,}주 주문이 체결되지 않았습니다.')
+            self.note.warn(f'매수 미체결 : {name}({code}) {qty:,}주. 다음 교체 때 다시 시도')
             return 0
 
         fill = self.client.get_fill(order['order_no'], code) if order else None
@@ -223,7 +225,7 @@ class MockBroker(Ledger):
         try:
             order = self.client.order('sell', code, qty)  # 시장가
         except OrderUncertain as ex:
-            self.note.send(f'주의 : {p.get("name", code)}({code}) 매도 주문 응답 없음, 잔고로 확인합니다 ({ex})')
+            self.note.warn(f'{p.get("name", code)}({code}) 매도 주문 응답 없음, 잔고로 확인합니다 ({ex})')
         remain = held['qty']
         for _ in range(CHECK_TRIES):
             time.sleep(CHECK_GAP)
