@@ -1,4 +1,6 @@
 @echo off
-rem quant-trader 실행 (작업 스케줄러 등록용)
+rem quant-trader run (for Task Scheduler)
 cd /d "%~dp0"
-".venv\Scripts\python.exe" run.py
+set PY=.venv\Scripts\python.exe
+if not exist "%PY%" set PY=..\.venv\Scripts\python.exe
+"%PY%" run.py

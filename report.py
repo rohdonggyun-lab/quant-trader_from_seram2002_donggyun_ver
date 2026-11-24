@@ -1,23 +1,20 @@
-"""가상 매매 결과 보고서 만들기
+"""모의투자 결과 보고서 만들기
 
     python report.py
 
-data/<장부>/trades.csv를 읽어서 results/<장부>.md를 새로 만든다.
-(data와 results 폴더는 모두 git에 올리지 않고 각자 컴퓨터에만 둔다)
-보고서는 매번 data에서 다시 만드므로 직접 고치지 않는다.
-관찰한 내용이나 메모는 results/journal.md에 따로 적는다.
+data/<BOOK>/trades.csv 와 state.json 을 읽어서 results/<BOOK>.md 를 새로 만든다.
+(data와 results 폴더는 git에 올리지 않고 각자 컴퓨터에만 둔다)
+보고서는 매번 data에서 다시 만드므로 직접 고치지 않는다. 메모는 results/journal.md에 따로 적는다.
 """
 import csv
 import json
-import re
-from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 
 import config
 
 ROOT = Path(__file__).resolve().parent
-DATA_ROOT = ROOT / 'data'
+BOOK_DIR = ROOT / 'data' / config.BOOK
 RESULTS_DIR = ROOT / 'results'
 
 
@@ -26,131 +23,93 @@ def won(x):
 
 
 def read_trades(path):
+    if not path.exists():
+        return []
     with open(path, encoding='utf-8-sig', newline='') as f:
         return list(csv.DictReader(f))
 
 
 def pair_trades(rows):
-    """매수와 매도를 종목별로 짝지어 한 건의 거래로 만든다."""
+    """매도마다 그 종목의 매수(여러 번이면 합친 것)와 짝지어 한 건의 거래로 만든다."""
     open_buys, trades = {}, []
     for r in rows:
+        code = r['code']
         if r['side'] == 'BUY':
-            open_buys[r['code']] = r
+            b = open_buys.setdefault(code, {'time': r['time'], 'qty': 0, 'cost': 0.0, 'reason': r['reason']})
+            b['qty'] += int(r['qty'])
+            b['cost'] += float(r['amount']) + float(r['fee'])
         elif r['side'] == 'SELL':
-            b = open_buys.pop(r['code'], None)
-            cost = float(b['amount']) + float(b['fee']) if b else 0
+            b = open_buys.get(code)
+            sold = int(r['qty'])
+            cost = b['cost'] * sold / b['qty'] if b and b['qty'] else 0.0
             profit = float(r['profit'] or 0)
-            drop = re.search(r'대비 ([+-][\d.]+%)', b['reason']) if b else None
-            hold = ''
+            days = ''
             if b:
-                t0 = datetime.strptime(b['time'], '%Y-%m-%d %H:%M:%S')
-                t1 = datetime.strptime(r['time'], '%Y-%m-%d %H:%M:%S')
-                hold = f'{int((t1 - t0).total_seconds() // 60)}분'
-            trades.append({
-                'date': r['time'][:10], 'name': r['name'], 'code': r['code'],
-                'buy_time': b['time'][11:16] if b else '', 'sell_time': r['time'][11:16],
-                'buy_price': float(b['price']) if b else 0, 'sell_price': float(r['price']),
-                'qty': int(r['qty']), 'signal': drop.group(1) if drop else (b['reason'] if b else ''),
-                'sell_reason': r['reason'], 'hold': hold,
-                'version': r.get('version') or (b.get('version') if b else '') or '',
-                'profit': profit, 'rate': profit / cost * 100 if cost else 0,
-                'cost': float(r['fee']) + float(r['tax']) + (float(b['fee']) if b else 0),
-            })
-    return trades, open_buys
+                days = (datetime.strptime(r['time'][:10], '%Y-%m-%d')
+                        - datetime.strptime(b['time'][:10], '%Y-%m-%d')).days
+                b['qty'] -= sold
+                b['cost'] -= cost
+                if b['qty'] <= 0:
+                    open_buys.pop(code)
+            trades.append({'buy': b['time'][:10] if b else '', 'sell': r['time'][:10], 'name': r['name'],
+                           'code': code, 'qty': sold, 'profit': profit, 'rate': profit / cost * 100 if cost else 0,
+                           'days': days, 'buy_reason': b['reason'] if b else '', 'sell_reason': r['reason'],
+                           'cost': float(r['fee']) + float(r['tax'])})
+    return trades
 
 
-def capital_of(book):
-    """장부의 시작 자금: config.STRATEGIES에서 찾고, 없으면 1,000만 원"""
-    for spec in getattr(config, 'STRATEGIES', []):
-        module = spec['strategy'].split('.')[0]
-        if book == f"{spec['account']}_{module}":
-            return spec['capital']
-    return 10_000_000
-
-
-def build(book):
-    rows = read_trades(DATA_ROOT / book / 'trades.csv')
-    trades, still_open = pair_trades(rows)
-    state = json.loads((DATA_ROOT / book / 'state.json').read_text(encoding='utf-8'))
-
-    days = OrderedDict()
-    for t in trades:
-        d = days.setdefault(t['date'], {'n': 0, 'win': 0, 'profit': 0.0})
-        d['n'] += 1
-        d['win'] += t['profit'] > 0
-        d['profit'] += t['profit']
-
-    wins = [t['profit'] for t in trades if t['profit'] > 0]
-    losses = [t['profit'] for t in trades if t['profit'] <= 0]
+def build():
+    rows = read_trades(BOOK_DIR / 'trades.csv')
+    trades = pair_trades(rows)
+    state = json.loads((BOOK_DIR / 'state.json').read_text(encoding='utf-8'))
+    wins = [t for t in trades if t['profit'] > 0]
     total = sum(t['profit'] for t in trades)
-    capital = capital_of(book)
-    equity, peak, mdd = capital, capital, 0.0
-    for d in days.values():
-        equity += d['profit']
-        peak = max(peak, equity)
-        mdd = min(mdd, equity / peak - 1)
+    held_cost = sum(p['cost'] for p in state['positions'].values())
 
-    out = []
-    kind = '모의투자' if book.startswith('mock_') else '가상 매매'
-    out.append(f'# {kind} 결과 — {book}\n')
-    out.append(f'`python report.py`로 `data/{book}/`에서 자동 생성한 보고서입니다. '
-               f'직접 고치지 말고, 메모는 [journal.md](journal.md)에 적습니다.\n')
-    out.append(f'생성 시각: {datetime.now():%Y-%m-%d %H:%M}\n')
-
-    out.append('## 요약\n')
-    out.append('| 항목 | 값 |\n|---|---|')
-    out.append(f'| 기간 | {", ".join(days) if len(days) <= 3 else f"{next(iter(days))} ~ {list(days)[-1]}"} ({len(days)}거래일) |')
-    out.append(f'| 시작 자금 | {capital:,}원 |')
-    out.append(f'| 현재 현금 | {state["cash"]:,.0f}원 |')
-    out.append(f'| 누적 실현손익 | {won(total)}원 ({total / capital * 100:+.2f}%) |')
-    out.append(f'| 거래 수 | {len(trades)}건 (이익 {len(wins)}, 손실 {len(losses)}) |')
+    out = [f'# 모의투자 결과 — 대형주 모멘텀 ({config.BOOK})\n',
+           f'`python report.py`로 `data/{config.BOOK}/`에서 자동 생성한 보고서입니다. '
+           f'직접 고치지 말고, 메모는 [journal.md](journal.md)에 적습니다.\n',
+           f'생성 시각: {datetime.now():%Y-%m-%d %H:%M}\n',
+           '## 요약\n', '| 항목 | 값 |\n|---|---|',
+           f'| 첫 거래 | {rows[0]["time"][:10] if rows else "-"} |',
+           f'| 시작 자금 | {config.CAPITAL:,}원 |',
+           f'| 현금 | {state["cash"]:,.0f}원 |',
+           f'| 보유 종목 매입원가 | {held_cost:,.0f}원 ({len(state["positions"])}종목) |',
+           f'| 마지막 교체 신호일 | {state.get("last_signal") or "-"} |',
+           f'| 실현손익 (판 종목) | {won(total)}원 |',
+           f'| 판 거래 수 | {len(trades)}건 (이익 {len(wins)}, 손실 {len(trades) - len(wins)}) |']
     if trades:
         out.append(f'| 승률 | {len(wins) / len(trades) * 100:.1f}% |')
-        out.append(f'| 평균 이익 / 평균 손실 | {won(sum(wins) / len(wins)) if wins else "-"}원 / '
-                   f'{won(sum(losses) / len(losses)) if losses else "-"}원 |')
-        best = max(trades, key=lambda t: t['profit'])
-        worst = min(trades, key=lambda t: t['profit'])
-        out.append(f'| 최대 이익 거래 | {best["name"]} {won(best["profit"])}원 ({best["rate"]:+.2f}%) |')
-        out.append(f'| 최대 손실 거래 | {worst["name"]} {won(worst["profit"])}원 ({worst["rate"]:+.2f}%) |')
-        out.append(f'| 비용 합계 (수수료, 세금) | {sum(t["cost"] for t in trades):,.0f}원 |')
-    out.append(f'| 최대 낙폭 (일 단위) | {mdd * 100:.2f}% |')
-    if still_open:
-        out.append(f'| 미청산 | {", ".join(b["name"] for b in still_open.values())} |')
+        days = [t['days'] for t in trades if t['days'] != '']
+        if days:
+            out.append(f'| 평균 보유 기간 | {sum(days) / len(days):.1f}일 |')
+        out.append(f'| 매도 비용 합계 (수수료, 세금) | {sum(t["cost"] for t in trades):,.0f}원 |')
+    out.append('\n평가손익은 현재가가 필요해서 여기 넣지 않았습니다. 슬랙의 보유 현황 알림을 보세요.\n')
+
+    out.append('## 보유 종목\n')
+    out.append('| 종목 | 수량 | 매입가 | 매입원가 | 매수일 |\n|---|---|---|---|---|')
+    for code, p in state['positions'].items():
+        out.append(f'| {p["name"]}({code}) | {p["qty"]:,} | {p["avg_price"]:,.0f} | {p["cost"]:,.0f} | {p["time"][:10]} |')
     out.append('')
 
-    out.append('## 일별 결과\n')
-    out.append('| 날짜 | 거래 | 이익/손실 | 실현손익 | 누적 손익 |\n|---|---|---|---|---|')
-    cum = 0.0
-    for date, d in days.items():
-        cum += d['profit']
-        out.append(f'| {date} | {d["n"]}건 | {d["win"]}/{d["n"] - d["win"]} | '
-                   f'{won(d["profit"])}원 | {won(cum)}원 |')
-    out.append('')
-
-    out.append('## 거래 내역\n')
-    out.append('| 날짜 | 버전 | 종목 | 매수 | 매도 | 보유 | 매수 신호 | 매입가 | 매도가 | 수량 | 손익 | 수익률 | 매도 사유 |')
-    out.append('|---|---|---|---|---|---|---|---|---|---|---|---|---|')
+    out.append('## 판 거래\n')
+    out.append('| 매수일 | 매도일 | 보유 | 종목 | 수량 | 손익 | 수익률 | 매수 이유 | 매도 이유 |')
+    out.append('|---|---|---|---|---|---|---|---|---|')
     for t in trades:
-        out.append(f'| {t["date"]} | {t["version"] or "-"} | {t["name"]}({t["code"]}) | {t["buy_time"]} | {t["sell_time"]} | '
-                   f'{t["hold"]} | {t["signal"]} | {t["buy_price"]:,.0f} | {t["sell_price"]:,.0f} | '
-                   f'{t["qty"]:,} | {won(t["profit"])} | {t["rate"]:+.2f}% | {t["sell_reason"]} |')
-    out.append('')
-    out.append('매입가와 매도가는 체결 가격 차이(SLIPPAGE)를 반영한 가상 체결가이고, '
-               '손익은 수수료와 매도 세금을 뺀 값입니다.\n')
+        out.append(f'| {t["buy"]} | {t["sell"]} | {t["days"]}일 | {t["name"]}({t["code"]}) | {t["qty"]:,} | '
+                   f'{won(t["profit"])} | {t["rate"]:+.2f}% | {t["buy_reason"]} | {t["sell_reason"]} |')
+    out.append('\n손익은 체결가 기준이고, 수수료와 매도 세금은 config 값으로 추정한 것입니다.\n')
     return '\n'.join(out)
 
 
 def main():
-    RESULTS_DIR.mkdir(exist_ok=True)
-    books = sorted(p.name for p in DATA_ROOT.iterdir()
-                   if p.is_dir() and (p / 'trades.csv').exists()) if DATA_ROOT.exists() else []
-    if not books:
-        print('data 폴더에 매매 기록이 없습니다.')
+    if not (BOOK_DIR / 'state.json').exists():
+        print(f'data/{config.BOOK} 에 장부가 없습니다. run.py 를 먼저 실행하세요.')
         return
-    for book in books:
-        path = RESULTS_DIR / f'{book}.md'
-        path.write_text(build(book), encoding='utf-8')
-        print(f'{path.relative_to(ROOT)} 생성')
+    RESULTS_DIR.mkdir(exist_ok=True)
+    path = RESULTS_DIR / f'{config.BOOK}.md'
+    path.write_text(build(), encoding='utf-8')
+    print(f'{path.relative_to(ROOT)} 생성')
 
 
 if __name__ == '__main__':

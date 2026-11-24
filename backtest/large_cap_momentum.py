@@ -40,60 +40,15 @@ import pandas as pd
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 import config  # noqa: E402
+# 순위 계산은 실매매(run.py)와 같은 코드를 쓴다
+from momentum import load, prepare, signal_days, ranking, SKIP  # noqa: E402
 
-DAILY = HERE / 'data' / 'daily'
 FEE, SLIP, TAX = config.FEE_RATE, config.SLIPPAGE, config.STOCK_SELL_TAX
 
-UNIVERSE_SIZE = 100
-SKIP = 5                    # 최근 5거래일은 모멘텀 계산에서 뺀다
-MARKET_MA = 60
 START = '2022-01-01'
 MAX_LOOKBACK = 250
 VARIANTS = list(itertools.product([60, 120, 250], [5, 10], [False, True]))   # (L, K, 시장 필터)
 FRIDAY, WEDNESDAY = 4, 2
-
-
-# ------------------------------------------------------------------ 데이터
-def load():
-    frames = []
-    for f in sorted(DAILY.glob('*.csv.gz')):
-        df = pd.read_csv(f, dtype={'ticker': str}, usecols=['ticker', 'close', 'volume', 'rate', 'mcap'])
-        df['date'] = pd.Timestamp(f.name[:8])
-        frames.append(df)
-    d = pd.concat(frames, ignore_index=True)
-    d = d[d['ticker'].str.endswith('0')]            # 우선주 제외
-    panel = {c: d.pivot(index='date', columns='ticker', values=c) for c in ['close', 'volume', 'rate', 'mcap']}
-    index = pd.read_csv(HERE / 'data' / 'kospi_index.csv', index_col='date', parse_dates=True)['close']
-    return panel, index.reindex(panel['close'].index)
-
-
-def prepare(panel, index):
-    close, volume, rate, mcap = (panel[c] for c in ['close', 'volume', 'rate', 'mcap'])
-    traded = (volume > 0) & close.notna()
-    r = (rate / 100).where(traded).fillna(0.0)
-    cum = np.log1p(r).cumsum()
-    in_uni = mcap.where(traded).rank(axis=1, ascending=False) <= UNIVERSE_SIZE
-    exists = close.notna()
-    last_seen = exists[::-1].idxmax()               # 종목별 마지막 시세 날짜
-    market_ok = index >= index.rolling(MARKET_MA).mean()
-    return dict(dates=close.index, tickers=close.columns, traded=traded, r=r, cum=cum,
-                in_uni=in_uni, exists=exists, last_seen=last_seen, market_ok=market_ok)
-
-
-def signal_days(dates, weekday):
-    """주마다 weekday 이하 요일 중 마지막 거래일"""
-    s = pd.Series(dates, index=dates)
-    s = s[s.dt.weekday <= weekday]
-    wk = s.dt.isocalendar()
-    return set(s.groupby([wk['year'], wk['week']]).max())
-
-
-def ranking(P, p, lookback):
-    """신호일 위치 p 의 모멘텀 순위 (1이 가장 강함)"""
-    cum = P['cum']
-    elig = P['in_uni'].iloc[p] & P['exists'].iloc[p - SKIP - lookback]
-    mom = (cum.iloc[p - SKIP] - cum.iloc[p - SKIP - lookback]).where(elig).dropna()
-    return mom.rank(ascending=False, method='first')
 
 
 # ------------------------------------------------------------------ 한 조합 실행
