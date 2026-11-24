@@ -1,5 +1,7 @@
 """대형주 모멘텀 전략의 계산 부분 (백테스트와 실매매가 같이 쓴다)
 
+기간(LOOKBACK)과 종목 수(HOLD)는 전략마다 config.STRATEGIES 에서 바꿔 쓸 수 있다. 아래는 기본값.
+
 규칙 v1 (2026-11-24 확정, backtest/large_cap_momentum.py 에서 검증한 조합)
     유니버스   : 신호일 시가총액 상위 100개 보통주 (우선주 제외, 신호일 거래된 종목)
     신호       : 최근 120거래일 수익률 (가장 최근 5거래일은 빼고 계산), 높은 순
@@ -102,24 +104,26 @@ def latest_signal(dates, today):
     return max(sig) if sig else None
 
 
-def decide(P, signal_day, held):
+def decide(P, signal_day, held, lookback=LOOKBACK, hold=HOLD):
     """신호일 기준으로 팔 종목과 살 후보를 정한다.
 
     held: 지금 이 전략이 들고 있는 종목 코드 목록
-    돌려주는 값: dict(market_ok, rank(Series), sells[(code, 이유)], buys[code ...] 순위순, 빈자리 수)
+    돌려주는 값: dict(market_ok, rank(Series), mom(Series), sells[(code, 이유)], keep, buys[code ...] 순위순, free)
     """
     p = P['dates'].get_loc(signal_day)
     ok = bool(P['market_ok'].iat[p])
-    rank = ranking(P, p)
+    rank = ranking(P, p, lookback)
+    sell_rank = 2 * hold
     sells = []
     for code in held:
         if not ok:
             sells.append((code, '시장 필터 (근사 코스피 < 60일 평균)'))
         elif code not in rank.index:
             sells.append((code, '유니버스(시가총액 상위 100) 이탈'))
-        elif rank[code] > SELL_RANK:
-            sells.append((code, f'순위 {int(rank[code])}위 (기준 {SELL_RANK}위 밖)'))
+        elif rank[code] > sell_rank:
+            sells.append((code, f'순위 {int(rank[code])}위 (기준 {sell_rank}위 밖)'))
     keep = [c for c in held if c not in {s[0] for s in sells}]
-    free = HOLD - len(keep) if ok else 0
-    buys = [c for c in rank.sort_values().index if c not in held][:max(free, 0) + 5]   # 못 사는 종목 대비 여유 5개
-    return dict(market_ok=ok, rank=rank, sells=sells, keep=keep, buys=buys, free=max(free, 0))
+    free = max(hold - len(keep), 0) if ok else 0
+    buys = [c for c in rank.sort_values().index if c not in held][:free + 5]   # 못 사는 종목 대비 여유 5개
+    return dict(market_ok=ok, rank=rank, mom=momentum(P, p, lookback), sells=sells, keep=keep,
+                buys=buys, free=free)

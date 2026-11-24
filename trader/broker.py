@@ -1,17 +1,20 @@
-"""모의투자 계좌 브로커 + 장부
+"""장부와 브로커
 
-사고팔 때 모의투자 계좌에 실제로 주문하고, 체결 수량과 체결가는 계좌에서 확인한 값을 쓴다.
-(예전 mock_broker.py / paper_broker.py 의 주문·체결 확인 방식을 그대로 옮겼다)
+Ledger      : 공통 장부 (현금, 보유 종목, 저장, 매매 기록)
+MockBroker  : 모의투자 계좌에 실제로 주문한다. 체결 수량과 체결가는 계좌에서 확인한 값을 쓴다.
+PaperBroker : 주문 없이 장부에만 기록한다. 그날 종가에 슬리피지만큼 불리하게 체결한 것으로 친다
+              (백테스트와 같은 비용 계산).
 
+모의투자 주문 방식 (예전 mock_broker.py 를 그대로 옮김)
 - 매수: 최유리지정가로 주문 → 2초 간격으로 체결 확인 → 덜 체결되면 잔량 취소 (쫓아 사지 않는다)
 - 매도: 시장가 주문 → 체결 확인. 덜 팔리면 남은 수량은 장부에 남겨 다음에 다시 판다
 - 주문 응답이 끊기면 다시 보내지 않고 잔고로 체결 여부를 확인한다 (두 번 사는 사고 방지)
 - 체결가: 주문 체결 조회 값, 조회가 안 되면 매수는 잔고의 평균 매입가, 매도는 주문 직전 현재가
 - 손익: 체결가 기준. 수수료와 세금은 config 값으로 추정 (모의투자 계좌가 실제로 떼는 비용과 다를 수 있음)
-- 장부의 현금은 전략에 배정한 자금(config.CAPITAL) 기준으로 따로 관리한다.
 
-장부는 data/<BOOK>/state.json, 매매 기록은 data/<BOOK>/trades.csv 에 저장해서 껐다 켜도 이어진다.
-이 계좌는 이 프로그램 전용으로 쓴다. 다른 경로로 산 종목은 건드리지 않고 알리기만 한다.
+장부는 data/<book>/state.json, 매매 기록은 data/<book>/trades.csv 에 저장해서 껐다 켜도 이어진다.
+현금은 전략에 배정한 자금(capital) 기준으로 따로 관리한다.
+모의투자 계좌는 이 프로그램의 모의투자 전략 하나 전용으로 쓴다.
 """
 import csv
 import json
@@ -30,17 +33,23 @@ CHECK_TRIES = 3         # 주문 뒤 체결 확인 횟수
 CHECK_GAP = 2           # 확인 간격(초)
 
 
-class Broker:
-    def __init__(self, client, note, version=''):
-        self.client, self.note, self.version = client, note, version
-        data_dir = DATA_ROOT / config.BOOK
+def now_str():
+    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+
+class Ledger:
+    account = ''
+
+    def __init__(self, book, capital, note, version=''):
+        self.book, self.capital, self.note, self.version = book, capital, note, version
+        data_dir = DATA_ROOT / book
         data_dir.mkdir(parents=True, exist_ok=True)
         self.state_file = data_dir / 'state.json'
         self.trades_file = data_dir / 'trades.csv'
         if self.state_file.exists():
             self.state = json.loads(self.state_file.read_text(encoding='utf-8'))
         else:
-            self.state = {'cash': config.CAPITAL, 'positions': {}, 'last_signal': ''}
+            self.state = {'cash': capital, 'positions': {}, 'last_signal': ''}
 
     # ------------------------------------------------------------ 저장
     def save(self):
@@ -69,10 +78,77 @@ class Broker:
         """현금 + 보유 종목 평가액 (prices: {code: 현재가}, 없으면 매입가)"""
         return self.cash + sum(p['qty'] * prices.get(c, p['avg_price']) for c, p in self.positions.items())
 
+    def reconcile(self):
+        """계좌와 장부 맞추기 (가상 장부는 할 일 없음)"""
+
+    # ------------------------------------------------------------ 장부 기록
+    def _book_buy(self, code, name, qty, avg, reason, order_no=''):
+        amount = round(avg * qty)
+        fee = round(amount * config.FEE_RATE)
+        t = now_str()
+        self.state['cash'] -= amount + fee
+        if code in self.positions:                   # 같은 날 다시 사서 수량이 늘어난 경우
+            p = self.positions[code]
+            p['cost'] += amount + fee
+            p['qty'] += qty
+            p['avg_price'] = round(p['cost'] / p['qty'], 2)
+        else:
+            self.positions[code] = {'qty': qty, 'avg_price': round(avg, 2), 'cost': amount + fee,
+                                    'name': name, 'time': t, 'order_no': order_no}
+        self.save()
+        self._record({'time': t, 'side': 'BUY', 'code': code, 'name': name, 'qty': qty,
+                      'price': round(avg, 2), 'amount': amount, 'fee': fee, 'tax': 0, 'profit': '',
+                      'reason': reason})
+
+    def _book_sell(self, code, qty, avg, reason):
+        p = self.positions[code]
+        amount = round(avg * qty)
+        fee = round(amount * config.FEE_RATE)
+        tax = round(amount * config.STOCK_SELL_TAX)
+        cost = p['cost'] * qty / p['qty']
+        profit = round(amount - fee - tax - cost)
+        self.state['cash'] += amount - fee - tax
+        if qty >= p['qty']:
+            self.positions.pop(code)
+        else:                                        # 일부만 팔림: 남은 수량은 다음에 다시 판다
+            p['qty'] -= qty
+            p['cost'] -= cost
+        self.save()
+        self._record({'time': now_str(), 'side': 'SELL', 'code': code, 'name': p.get('name', code),
+                      'qty': qty, 'price': round(avg, 2), 'amount': amount, 'fee': fee, 'tax': tax,
+                      'profit': profit, 'reason': reason})
+        return profit
+
+
+class PaperBroker(Ledger):
+    """가상 장부: price(그날 종가)에 슬리피지만큼 불리하게 체결"""
+    account = 'paper'
+
+    def buy(self, code, name, price, budget, reason=''):
+        fill = price * (1 + config.SLIPPAGE)
+        qty = int(min(budget, self.cash) // (fill * (1 + config.FEE_RATE)))
+        if qty <= 0:
+            self.note.log(f'{name}({code}) 살 돈이 모자람 (예산 {budget:,.0f}, 현금 {self.cash:,.0f}, 종가 {price:,})')
+            return 0
+        self._book_buy(code, name, qty, fill, reason)
+        return qty
+
+    def sell(self, code, price, reason=''):
+        qty = self.positions[code]['qty']
+        return self._book_sell(code, qty, price * (1 - config.SLIPPAGE), reason), qty
+
+
+class MockBroker(Ledger):
+    """모의투자 계좌에 실제 주문"""
+    account = 'mock'
+
+    def __init__(self, book, capital, note, version, client):
+        super().__init__(book, capital, note, version)
+        self.client = client
+
     def _held(self, code):
         return self.client.get_balance().get(code)
 
-    # ------------------------------------------------------------ 장부와 계좌 맞추기
     def reconcile(self):
         held = self.client.get_balance()
         for code in list(self.positions):
@@ -91,9 +167,7 @@ class Broker:
         if others:
             self.note.send('참고 : 이 프로그램이 사지 않은 종목이 계좌에 있습니다 (건드리지 않음) : '
                            + ', '.join(others))
-        return held
 
-    # ------------------------------------------------------------ 매수
     def buy(self, code, name, price, budget, reason=''):
         """최유리지정가 매수. 체결된 수량을 돌려준다 (0이면 못 삼)"""
         before = (self._held(code) or {}).get('qty', 0)
@@ -130,26 +204,10 @@ class Broker:
         fill = self.client.get_fill(order['order_no'], code) if order else None
         avg = fill['avg_price'] if fill and fill['qty'] else \
             (self._held(code) or {}).get('avg_price') or price
-        amount = round(avg * filled)
-        fee = round(amount * config.FEE_RATE)
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        self.state['cash'] -= amount + fee
-        if code in self.positions:                       # 같은 날 다시 사서 수량이 늘어난 경우
-            p = self.positions[code]
-            p['cost'] += amount + fee
-            p['qty'] += filled
-            p['avg_price'] = round((p['cost']) / p['qty'], 2)
-        else:
-            self.positions[code] = {'qty': filled, 'avg_price': round(avg, 2), 'cost': amount + fee,
-                                    'name': name, 'time': now, 'order_no': order['order_no'] if order else ''}
-        self.save()
         note = '' if filled == qty else f' (주문 {qty:,}주 중 일부 체결, 나머지 취소)'
-        self._record({'time': now, 'side': 'BUY', 'code': code, 'name': name, 'qty': filled,
-                      'price': round(avg, 2), 'amount': amount, 'fee': fee, 'tax': 0, 'profit': '',
-                      'reason': reason + note})
+        self._book_buy(code, name, filled, avg, reason + note, order['order_no'] if order else '')
         return filled
 
-    # ------------------------------------------------------------ 매도
     def sell(self, code, price, reason=''):
         """시장가 매도. (손익, 판 수량)을 돌려준다. 팔 수 없으면 KISError"""
         p = self.positions[code]
@@ -172,27 +230,11 @@ class Broker:
             remain = (self._held(code) or {}).get('qty', 0)
             if remain <= held['qty'] - qty:
                 break
-        sold = held['qty'] - remain
+        sold = min(held['qty'] - remain, p['qty'])
         if sold <= 0:
             raise KISError(f'{p.get("name", code)}({code}) 매도가 체결되지 않았습니다.')
 
         fill = self.client.get_fill(order['order_no'], code) if order else None
         avg = fill['avg_price'] if fill and fill['qty'] else price
-        amount = round(avg * sold)
-        fee = round(amount * config.FEE_RATE)
-        tax = round(amount * config.STOCK_SELL_TAX)
-        cost = p['cost'] * sold / p['qty']
-        profit = round(amount - fee - tax - cost)
-        self.state['cash'] += amount - fee - tax
-        if sold >= p['qty']:
-            self.positions.pop(code)
-        else:                                            # 일부만 팔림: 남은 수량은 다음에 다시 판다
-            p['qty'] -= sold
-            p['cost'] -= cost
-        self.save()
-        self._record({'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 'side': 'SELL',
-                      'code': code, 'name': p.get('name', code), 'qty': sold,
-                      'price': round(avg, 2), 'amount': amount, 'fee': fee, 'tax': tax,
-                      'profit': profit,
-                      'reason': reason + ('' if fill else ' (체결가는 주문 직전 현재가로 추정)')})
+        profit = self._book_sell(code, sold, avg, reason + ('' if fill else ' (체결가는 주문 직전 현재가로 추정)'))
         return profit, sold
