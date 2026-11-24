@@ -3,7 +3,7 @@
     python run.py           오늘 할 일을 하고 종료 (교체일이면 모의투자 15:10~15:19 주문, 가상 15:31 종가 체결)
     python run.py --check   주문 없이 "오늘 교체한다면 무엇을 사고팔지"만 전략별로 출력
 
-하루 흐름
+하루 흐름 (매일 아침 어제 장 마감 기준 시장 상황도 채널마다 알린다)
     1. KRX Open API에서 어제까지의 시세를 받는다 (아직 안 올라왔으면 10분마다 다시, 14:30까지)
     2. 전략마다, 지난주 신호일(그 주 마지막 거래일)의 교체를 아직 안 했으면 오늘이 교체일
        - 아침에 팔 종목, 살 후보를 그 전략의 슬랙 채널로 알린다
@@ -201,7 +201,7 @@ def load_signal():
     signal = M.latest_signal(P['dates'], datetime.now())
     if signal is None:
         raise RuntimeError('신호일을 찾지 못했습니다 (데이터 부족).')
-    return P, signal, P['names']
+    return P, signal, P['names'], index
 
 
 def guarded(runner, what, fn):
@@ -217,6 +217,21 @@ def warn_all(runners, message, footer=''):
     for r in runners:
         r.note.warn(message)
         r.note.flush(footer)
+
+
+def post_market(runners, index):
+    """어제 장 마감 기준 시장 상황. 채널마다 한 번씩 보낸다"""
+    mock = next((s for s in config.STRATEGIES if s['account'] == 'mock'), None)
+    logic = f'⚪ 기본 ({mock["name"]})' if mock else '-'
+    seen = set()
+    for r in runners:
+        if r.spec['channel'] in seen:
+            continue
+        seen.add(r.spec['channel'])
+        try:
+            r.note.post(*MSG.market(index, logic))
+        except Exception as ex:                     # 시장 상황 알림이 실패해도 매매는 계속한다
+            r.note.log(f'시장 상황 알림 실패 : {ex}')
 
 
 def post_status(runners):
@@ -238,7 +253,8 @@ def post_status(runners):
 def check(client):
     runners = [Runner(s, client, check=True) for s in config.STRATEGIES]
     get_data(client, [r.note for r in runners], wait=False)
-    P, signal, names = load_signal()
+    P, signal, names, index = load_signal()
+    post_market(runners, index)
     idle = []
     for r in runners:
         if r.plan(P, signal, names):
@@ -292,7 +308,8 @@ def main():
             r.note.flush('오늘은 교체하지 않습니다.')
         post_status(runners)
         return
-    P, signal, names = load_signal()
+    P, signal, names, index = load_signal()
+    post_market(runners, index)
     todo, idle = [], []
     for r in runners:
         if r.plan(P, signal, names):

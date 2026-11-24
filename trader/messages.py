@@ -128,3 +128,51 @@ def status(runners, prices):
     for r in runners:
         blocks += [F.divider(), F.text(f'*{r.spec["name"]}*'), F.code(holdings_table(r, prices))]
     return title, blocks
+
+
+# ------------------------------------------------------------------ 시장 상황 (매일)
+# 백테스트(backtest/regime_strategies.py, 2022-01 ~ 2026-11)에서 그 상황에 가장 나았던 로직
+BEST_LOGIC = {'G': '⚪ 기본', 'GB': '🟠 꺾일 때 (기본보다 손실이 작았음)', 'B': '⚪ 기본 (시장 필터로 현금)',
+              'BG': '⚪ 기본'}
+
+
+def market(index, logic_name):
+    """index: 근사 코스피 전체. 마지막 날(어제) 장 마감 기준 시장 상황"""
+    import momentum as M
+    raw, conf = M.regimes(index)
+    d = index.index[-1]
+    now = conf.iat[-1]
+    streak = 0
+    for s in reversed(conf.tolist()):
+        if s != now:
+            break
+        streak += 1
+    prev = next((s for s in reversed(conf.tolist()[:-streak]) if s), '') if streak < len(conf) else ''
+    ma20, ma60 = index.rolling(20).mean().iat[-1], index.rolling(60).mean().iat[-1]
+    chg = index.iat[-1] / index.iat[-2] - 1
+    vol = index.pct_change().rolling(20).std() * (252 ** 0.5)
+    v_now, v_mid = vol.iat[-1], vol.iloc[-250:].median()
+    level = '높음' if v_now > v_mid * 1.25 else ('낮음' if v_now < v_mid * 0.8 else '보통')
+
+    E, N = M.REGIME_EMOJI, M.REGIME_NAMES
+    title = f'📊 시장 상황 · {day(d)} 장 마감 기준'
+    state = f'{E[now]} *{N[now]}*  ({streak}거래일째)'
+    blocks = [F.header(title),
+              F.text(state + (f'\n{E[prev]} {N[prev]} → {E[now]} {N[now]} 로 바뀜' if prev and streak <= 5 else '')),
+              F.fields([('근사 코스피', f'{index.iat[-1]:,.1f}  ({F.signed_pct(chg)})'),
+                        ('20일선 / 60일선', f'{ma20:,.1f} / {ma60:,.1f}'),
+                        ('지수 위치', f'20일선 {"위" if index.iat[-1] > ma20 else "아래"} · '
+                                     f'60일선 {"위" if index.iat[-1] > ma60 else "아래"}'),
+                        ('변동성 (20일)', f'{level}  (연 {v_now:.0%}, 1년 보통 {v_mid:.0%})')]),
+              F.text('*최근 10거래일* (왼쪽이 오래된 날)\n' + ' '.join(E[s] for s in conf.iloc[-10:]))]
+    if raw.iat[-1] and raw.iat[-1] != now:
+        run = 0
+        for s in reversed(raw.tolist()):
+            if s != raw.iat[-1]:
+                break
+            run += 1
+        blocks.append(F.context(f'{E[raw.iat[-1]]} {N[raw.iat[-1]]} 쪽으로 움직이는 중 '
+                                f'({run}/{M.REGIME_CONFIRM}일, {M.REGIME_CONFIRM}일 연속이면 상황이 바뀜)'))
+    blocks += [F.divider(),
+               F.context(f'지금 모의투자 로직 : {logic_name}  ·  백테스트상 이 상황에 가장 나았던 로직 : {BEST_LOGIC[now]}')]
+    return f'{title} · {E[now]} {N[now]} ({streak}거래일째)', blocks

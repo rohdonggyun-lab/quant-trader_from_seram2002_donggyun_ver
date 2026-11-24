@@ -127,3 +127,31 @@ def decide(P, signal_day, held, lookback=LOOKBACK, hold=HOLD):
     buys = [c for c in rank.sort_values().index if c not in held][:free + 5]   # 못 사는 종목 대비 여유 5개
     return dict(market_ok=ok, rank=rank, mom=momentum(P, p, lookback), sells=sells, keep=keep,
                 buys=buys, free=free)
+
+
+# ------------------------------------------------------------------ 시장 상황 (알림과 backtest/regime_strategies.py 가 같이 씀)
+REGIME_NAMES = {'G': '좋음', 'GB': '좋다가 나빠지는 중', 'B': '안 좋음', 'BG': '나쁘다가 좋아지는 중'}
+REGIME_EMOJI = {'G': '🟢', 'GB': '🟠', 'B': '🔴', 'BG': '🔵', '': '⚪'}
+REGIME_CONFIRM = 3          # 같은 상태가 이만큼 연속으로 나와야 상황이 바뀐 것으로 친다
+
+
+def regimes(index, confirm=REGIME_CONFIRM):
+    """근사 코스피로 매일의 시장 상황. (그날 상태 raw, 확정된 상황 conf) 두 Series
+
+    G  좋음                20일선 > 60일선, 지수 > 20일선
+    GB 좋다가 나빠지는 중   20일선 > 60일선, 지수 <= 20일선
+    B  안 좋음              20일선 <= 60일선, 지수 <= 20일선
+    BG 나쁘다가 좋아지는 중 20일선 <= 60일선, 지수 > 20일선
+    """
+    ma20, ma60 = index.rolling(20).mean(), index.rolling(60).mean()
+    raw = pd.Series(np.where(ma20 > ma60, np.where(index > ma20, 'G', 'GB'),
+                             np.where(index > ma20, 'BG', 'B')), index=index.index)
+    raw[ma60.isna()] = ''
+    conf, cur, run_state, run_len = [], '', '', 0
+    for s in raw:
+        run_len = run_len + 1 if s == run_state else 1
+        run_state = s
+        if not cur or (s != cur and run_len >= confirm):
+            cur = s
+        conf.append(cur)
+    return raw, pd.Series(conf, index=index.index)

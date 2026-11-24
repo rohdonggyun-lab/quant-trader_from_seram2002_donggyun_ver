@@ -38,6 +38,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 import config  # noqa: E402
 from momentum import load, prepare, signal_days, SKIP  # noqa: E402
+import momentum as M  # noqa: E402
 
 FEE, SLIP, TAX = config.FEE_RATE, config.SLIPPAGE, config.STOCK_SELL_TAX
 START = '2022-01-01'
@@ -50,18 +51,8 @@ MIN_DAYS = 40
 
 # ------------------------------------------------------------------ 시장 상황
 def regimes(index):
-    ma20, ma60 = index.rolling(20).mean(), index.rolling(60).mean()
-    raw = pd.Series(np.where(ma20 > ma60, np.where(index > ma20, 'G', 'GB'),
-                             np.where(index > ma20, 'BG', 'B')), index=index.index)
-    raw[ma60.isna()] = ''
-    conf, cur, run_state, run_len = [], '', '', 0
-    for s in raw:
-        run_len = run_len + 1 if s == run_state else 1
-        run_state = s
-        if not cur or (s != cur and run_len >= CONFIRM):
-            cur = s
-        conf.append(cur)
-    return pd.Series(conf, index=index.index)
+    """확정된 시장 상황 (실매매 알림과 같은 코드: momentum.regimes)"""
+    return M.regimes(index, CONFIRM)[1]
 
 
 # ------------------------------------------------------------------ 로직별 순위
