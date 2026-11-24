@@ -10,3 +10,4 @@ __pycache__/
 
 results/
 backtest/fetch.log
+backtest/fetch_index.log
