@@ -37,7 +37,8 @@ def real_kospi():
 
 
 def main():
-    panel, proxy = M.load()
+    panel, _ = M.load()
+    proxy = pd.read_csv(HERE / 'data' / 'kospi_index.csv', index_col='date', parse_dates=True)['close']
     real = real_kospi()
     rows, curves, P_by = [], {}, {}
     for name, idx in (('근사 코스피', proxy), ('실제 코스피', real)):

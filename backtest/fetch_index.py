@@ -7,6 +7,7 @@ backtest/data/index/YYYYMMDD.csv.gz 로 저장한다. 한 번 호출에 그날 �
 - 이미 받은 날은 건너뛰므로 중간에 멈춰도 다시 실행하면 이어 받는다
 - 인증키는 .env 의 KRX_API_KEY (화면에 출력하지 않음), 요청 사이 간격과 호출 상한은 fetch_data.py 와 같다
 - 실패를 조용히 넘기지 않는다: 오류가 나면 멈추고 받은 날 수와 빠진 날을 출력한다
+- 끝나면 실제 코스피 종가를 backtest/data/kospi.csv (date, close) 로 모은다 (시장 필터와 시장 상황에 쓴다)
 """
 import sys
 import time
@@ -20,6 +21,7 @@ sys.path.insert(0, str(HERE))
 import fetch_data as F  # noqa: E402
 
 URL = 'https://data-dbg.krx.co.kr/svc/apis/idx/kospi_dd_trd'
+KOSPI = '코스피'
 OUT = F.DATA / 'index'
 FIELDS = {'OPNPRC_IDX': 'open', 'HGPRC_IDX': 'high', 'LWPRC_IDX': 'low', 'CLSPRC_IDX': 'close',
           'FLUC_RT': 'rate', 'ACC_TRDVAL': 'value', 'MKTCAP': 'mcap'}
@@ -58,6 +60,20 @@ def to_frame(rows):
     return out
 
 
+def build_kospi():
+    """받아 둔 지수 파일에서 '코스피' 종가만 모아 data/kospi.csv 로 저장한다"""
+    vals = {}
+    for f in sorted(OUT.glob('*.csv.gz')):
+        d = pd.read_csv(f, usecols=['name', 'close'])
+        row = d.loc[d['name'] == KOSPI, 'close']
+        if len(row):
+            vals[pd.Timestamp(f.name[:8])] = float(row.iloc[0])
+    s = pd.Series(vals, name='close')
+    s.index.name = 'date'
+    s.to_frame().to_csv(F.DATA / 'kospi.csv')
+    return s
+
+
 def main():
     if not F.KEY:
         raise SystemExit('.env 에 KRX_API_KEY 가 없습니다.')
@@ -84,7 +100,8 @@ def main():
     if error:
         print('중단 :', error)
         sys.exit(1)
-    print('완료')
+    build_kospi()
+    print('완료 (실제 코스피 data/kospi.csv 갱신)')
 
 
 if __name__ == '__main__':

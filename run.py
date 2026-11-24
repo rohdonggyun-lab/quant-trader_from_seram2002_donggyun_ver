@@ -198,6 +198,9 @@ def get_data(client, notes, wait):
 def load_signal():
     panel, index = M.load(LOAD_DAYS)
     P = M.prepare(panel, index)
+    if index.index[-1] < P['dates'][-1]:
+        raise KISError(f'코스피 지수가 {index.index[-1]:%m/%d}까지만 있습니다 '
+                       f'(종목 시세는 {P["dates"][-1]:%m/%d}까지). 오늘은 교체하지 않습니다.')
     signal = M.latest_signal(P['dates'], datetime.now())
     if signal is None:
         raise RuntimeError('신호일을 찾지 못했습니다 (데이터 부족).')
@@ -308,7 +311,12 @@ def main():
             r.note.flush('오늘은 교체하지 않습니다.')
         post_status(runners)
         return
-    P, signal, names, index = load_signal()
+    try:
+        P, signal, names, index = load_signal()
+    except (KISError, RuntimeError, OSError) as ex:
+        warn_all(runners, str(ex))
+        post_status(runners)
+        return
     post_market(runners, index)
     todo, idle = [], []
     for r in runners:

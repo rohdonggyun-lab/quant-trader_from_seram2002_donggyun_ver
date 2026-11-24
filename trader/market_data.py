@@ -1,4 +1,7 @@
-"""매일 아침 KRX Open API에서 빠진 날의 시세를 받아 둔다 (backtest/fetch_data.py 의 함수를 그대로 쓴다)
+"""매일 아침 KRX Open API에서 빠진 날의 시세를 받아 둔다
+(backtest/fetch_data.py, backtest/fetch_index.py 의 함수를 그대로 쓴다)
+
+- 종목 시세(코스피·코스닥 전 종목)와 코스피 시리즈 지수(실제 코스피 포함)를 같은 거래일만큼 받는다
 
 KRX 데이터는 다음 날 아침에 올라온다. 두 시장 모두 0건인 날이
 - 한국투자증권 일별 시세(삼성전자)에 있는 날이면: KRX에 아직 안 올라온 것 → NotReady (나중에 다시)
@@ -13,6 +16,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'backtest'))
 import fetch_data  # noqa: E402
+import fetch_index  # noqa: E402
 
 PROBE = '005930'        # 휴장일 확인에 쓰는 종목 (삼성전자)
 
@@ -60,4 +64,15 @@ def update(client, today=None):
         got.append(day)
     if got:
         fetch_data.build_index()
+    # 지수: 종목 시세가 있는 거래일 중 아직 안 받은 날
+    fetch_index.OUT.mkdir(parents=True, exist_ok=True)
+    days = sorted(f.name[:8] for f in fetch_data.DAILY.glob('*.csv.gz'))
+    idx_todo = [d for d in days if not (fetch_index.OUT / f'{d}.csv.gz').exists()]
+    for day in idx_todo:
+        rows = fetch_index.call(day)
+        if not rows:
+            raise NotReady(f'{day} 지수 시세가 KRX에 아직 올라오지 않았습니다.')
+        fetch_index.to_frame(rows).to_csv(fetch_index.OUT / f'{day}.csv.gz', index=False, compression='gzip')
+    if idx_todo or not (fetch_data.DATA / 'kospi.csv').exists():
+        fetch_index.build_kospi()
     return got

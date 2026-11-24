@@ -69,7 +69,7 @@ def plan(r, when):
             spare = ', '.join(short(names.get(c, c), 6) for c in d['buys'][d['free']:])
             blocks.append(F.context(f'못 사는 종목이 있으면 다음 순위로 채움 : {spare}'))
     elif not d['market_ok']:
-        blocks.append(F.text('근사 코스피가 60일 평균 아래라서 오늘은 *사지 않습니다*.'))
+        blocks.append(F.text('코스피가 60일 평균 아래라서 오늘은 *사지 않습니다*.'))
     else:
         blocks.append(F.text('바꿀 종목이 없습니다. 지금 보유 종목을 그대로 둡니다.'))
     if d['keep']:
@@ -137,7 +137,7 @@ BEST_LOGIC = {'G': '⚪ 기본', 'GB': '🟠 꺾일 때 (기본보다 손실이 
 
 
 def market(index, logic_name):
-    """index: 근사 코스피 전체. 마지막 날(어제) 장 마감 기준 시장 상황"""
+    """index: 코스피 전체. 마지막 날(어제) 장 마감 기준 시장 상황"""
     import momentum as M
     raw, conf = M.regimes(index)
     d = index.index[-1]
@@ -159,8 +159,8 @@ def market(index, logic_name):
     state = f'{E[now]} *{N[now]}*  ({streak}거래일째)'
     blocks = [F.header(title),
               F.text(state + (f'\n{E[prev]} {N[prev]} → {E[now]} {N[now]} 로 바뀜' if prev and streak <= 5 else '')),
-              F.fields([('근사 코스피', f'{index.iat[-1]:,.1f}  ({F.signed_pct(chg)})'),
-                        ('20일선 / 60일선', f'{ma20:,.1f} / {ma60:,.1f}'),
+              F.fields([('코스피', f'{index.iat[-1]:,.2f}  ({F.signed_pct(chg)})'),
+                        ('20일선 / 60일선', f'{ma20:,.2f} / {ma60:,.2f}'),
                         ('지수 위치', f'20일선 {"위" if index.iat[-1] > ma20 else "아래"} · '
                                      f'60일선 {"위" if index.iat[-1] > ma60 else "아래"}'),
                         ('변동성 (20일)', f'{level}  (연 {v_now:.0%}, 1년 보통 {v_mid:.0%})')]),

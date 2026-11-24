@@ -8,10 +8,12 @@
     교체       : 매주 마지막 거래일(신호일) 종가로 순위를 매기고, 다음 거래일에 사고판다
     보유       : 10종목. 살 때마다 그 시점 전체 자산의 1/10
     매도       : 순위가 20위 밖으로 밀리거나 유니버스에서 빠지면 판다
-    시장 필터  : 신호일 근사 코스피가 60일 이동평균 아래면 전부 팔고 현금으로 기다린다
+    시장 필터  : 신호일 코스피가 60일 이동평균 아래면 전부 팔고 현금으로 기다린다
 
 데이터는 backtest/data/daily/YYYYMMDD.csv.gz (KRX Open API 일별 전 종목 시세)와
-backtest/data/kospi_index.csv (코스피 종목 시가총액 가중 근사 지수)를 쓴다.
+backtest/data/kospi.csv (KRX 코스피 지수 종가, backtest/fetch_index.py)를 쓴다.
+(2026-11-24까지는 종목 시세로 만든 근사 지수를 썼다. 실제 지수로 바꿔도 백테스트 결과가 같음을 확인:
+ backtest/real_kospi_filter.py)
 """
 from pathlib import Path
 
@@ -48,8 +50,12 @@ def load(last_days=None):
     d = d[d['ticker'].str.endswith('0')]            # 우선주 제외
     panel = {c: d.pivot(index='date', columns='ticker', values=c) for c in ['close', 'volume', 'rate', 'mcap']}
     panel['names'] = d.drop_duplicates('ticker', keep='last').set_index('ticker')['name']
-    index = pd.read_csv(DATA / 'kospi_index.csv', index_col='date', parse_dates=True)['close']
-    return panel, index
+    return panel, load_kospi()
+
+
+def load_kospi():
+    """실제 코스피 종가 (backtest/data/kospi.csv)"""
+    return pd.read_csv(DATA / 'kospi.csv', index_col='date', parse_dates=True)['close']
 
 
 def prepare(panel, index):
@@ -117,7 +123,7 @@ def decide(P, signal_day, held, lookback=LOOKBACK, hold=HOLD):
     sells = []
     for code in held:
         if not ok:
-            sells.append((code, '시장 필터 (근사 코스피 < 60일 평균)'))
+            sells.append((code, '시장 필터 (코스피 < 60일 평균)'))
         elif code not in rank.index:
             sells.append((code, '유니버스(시가총액 상위 100) 이탈'))
         elif rank[code] > sell_rank:
@@ -136,7 +142,7 @@ REGIME_CONFIRM = 3          # 같은 상태가 이만큼 연속으로 나와야 
 
 
 def regimes(index, confirm=REGIME_CONFIRM):
-    """근사 코스피로 매일의 시장 상황. (그날 상태 raw, 확정된 상황 conf) 두 Series
+    """코스피로 매일의 시장 상황. (그날 상태 raw, 확정된 상황 conf) 두 Series
 
     G  좋음                20일선 > 60일선, 지수 > 20일선
     GB 좋다가 나빠지는 중   20일선 > 60일선, 지수 <= 20일선
