@@ -65,6 +65,7 @@ class ManualWatch:
             self.state['events'] += events
             for e in events:
                 self.broker.record_manual(e)
+            self.broker.sync_cash()                     # 직접 거래로 바뀐 현금을 바로 장부에 반영
         self.broker.save()
         if events:
             self.note.post(*MSG.manual_trades(events))
