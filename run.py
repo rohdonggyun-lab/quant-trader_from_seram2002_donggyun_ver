@@ -93,7 +93,7 @@ class Runner:
     def prices(self, known=None):
         """보유 종목 현재가 {code: price}. known 에 있으면 다시 조회하지 않는다"""
         out = dict(known or {})
-        for code, p in self.broker.positions.items():
+        for code, p in list(self.broker.positions.items()) + list(self.broker.manual_positions.items()):
             if code not in out:
                 try:
                     out[code] = self.client.get_price(code)['price']

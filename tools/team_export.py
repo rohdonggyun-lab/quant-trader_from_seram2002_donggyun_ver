@@ -56,8 +56,9 @@ def books(strategies):
 
 def equity(state, price):
     """state.json 내용과 price(code) → (총자산, 현금, 보유 평가액, 종목 수)"""
-    held = state.get('positions', {})
-    value = sum(p['qty'] * price(code, p) for code, p in held.items())
+    held = list(state.get('positions', {}).items())
+    held += list(state.get('manual_positions', {}).items())   # 직접 거래로 산 종목 (장부에 이 칸이 있을 때만)
+    value = sum(p['qty'] * price(code, p) for code, p in held)
     return state['cash'] + value, state['cash'], value, len(held)
 
 

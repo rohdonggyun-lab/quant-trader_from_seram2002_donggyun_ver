@@ -75,9 +75,23 @@ class Ledger:
     def positions(self):
         return self.state['positions']
 
+    @property
+    def manual_positions(self):
+        """직접 거래로 산 종목 (프로그램이 관리하지 않음, 총자산에만 들어감)"""
+        return self.state.setdefault('manual_positions', {})
+
     def equity(self, prices):
-        """현금 + 보유 종목 평가액 (prices: {code: 현재가}, 없으면 매입가)"""
-        return self.cash + sum(p['qty'] * prices.get(c, p['avg_price']) for c, p in self.positions.items())
+        """현금 + 프로그램 보유 + 직접 보유 평가액 (prices: {code: 현재가}, 없으면 매입가)"""
+        held = list(self.positions.items()) + list(self.manual_positions.items())
+        return self.cash + sum(p['qty'] * prices.get(c, p['avg_price']) for c, p in held)
+
+    def record_manual(self, event):
+        """직접 거래 한 건을 매매 기록에 남긴다 (수수료·세금은 알 수 없어 0)"""
+        self._record({'time': now_str(), 'side': 'BUY' if event['side'] == '매수' else 'SELL',
+                      'code': event['code'], 'name': event['name'], 'qty': event['qty'],
+                      'price': round(event['price'], 2), 'amount': round(event['amount']), 'fee': 0, 'tax': 0,
+                      'profit': '', 'reason': '직접 거래 (잔고 비교로 감지'
+                      + (', 단가는 현재가 추정)' if event.get('estimated') else ')')})
 
     def reconcile(self):
         """계좌와 장부 맞추기 (가상 장부는 할 일 없음)"""

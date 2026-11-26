@@ -6,6 +6,8 @@
 - 프로그램이 주문하기 직전에 한 번 확인하고(tick), 주문이 끝나면 기준을 새로 잡는다(rebase)
   → 프로그램 자신의 매매는 직접 거래로 알리지 않는다
 - 매수 단가는 평균 매입가 변화로 계산하고, 매도 단가는 그때의 현재가로 추정한다
+- 직접 보유 종목은 장부의 manual_positions 에 두고 총자산에 넣는다 (계좌 수량 - 프로그램 수량).
+  직접 거래는 매매 기록(trades.csv)에도 남긴다. 프로그램 판단(순위, 빈자리, 매도)에는 넣지 않는다
 """
 from datetime import datetime
 
@@ -58,18 +60,31 @@ class ManualWatch:
                            'qty': abs(delta), 'price': price, 'amount': abs(delta) * price,
                            'estimated': side == '매도'})
         self.state['snapshot'] = held
+        self._sync_manual(held)
         if events:
             self.state['events'] += events
-            self.broker.save()
+            for e in events:
+                self.broker.record_manual(e)
+        self.broker.save()
+        if events:
             self.note.post(*MSG.manual_trades(events))
-        else:
-            self.broker.save()
         return len(events)
+
+    def _sync_manual(self, held):
+        """직접 보유 = 계좌 수량 - 프로그램 수량"""
+        manual = self.broker.manual_positions
+        manual.clear()
+        for code, v in held.items():
+            qty = v['qty'] - self.broker.positions.get(code, {}).get('qty', 0)
+            if qty > 0:
+                manual[code] = {'qty': qty, 'avg_price': v['avg'], 'cost': round(v['avg'] * qty),
+                                'name': v['name']}
 
     def rebase(self):
         """프로그램이 주문한 뒤: 지금 잔고를 새 기준으로"""
         try:
             self.state['snapshot'] = self._held()
+            self._sync_manual(self.state['snapshot'])
             self.broker.save()
         except KISError as ex:
             self.note.log(f'직접 거래 기준 갱신 실패 : {ex}')

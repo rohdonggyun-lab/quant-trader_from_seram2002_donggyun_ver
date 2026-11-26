@@ -28,14 +28,15 @@ def short(name, n=8):
 
 
 def holdings_table(r, prices):
-    pos = r.broker.positions
-    if not pos:
+    pos = list(r.broker.positions.items())
+    manual = list(r.broker.manual_positions.items())
+    if not pos and not manual:
         return '보유 종목 없음 (현금 100%)'
     rows = []
-    for code, p in pos.items():
+    for (code, p), tag in [(x, '') for x in pos] + [(x, ' (직접)') for x in manual]:
         now = prices.get(code, p['avg_price'])
-        rows.append([short(p['name']), f'{p["qty"]:,}', f'{p["avg_price"]:,.0f} → {now:,.0f}',
-                     F.pct(now * p['qty'] / p['cost'] - 1)])
+        rows.append([short(p['name'], 7) + tag, f'{p["qty"]:,}', f'{p["avg_price"]:,.0f} → {now:,.0f}',
+                     F.pct(now * p['qty'] / p['cost'] - 1 if p['cost'] else 0)])
     return F.table(['종목', '수량', '매입가 → 현재가', '손익'], rows, right={1, 2, 3})
 
 

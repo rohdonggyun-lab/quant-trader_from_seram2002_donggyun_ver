@@ -77,7 +77,8 @@ def load_book(spec, closes):
     state = json.loads((book_dir / 'state.json').read_text(encoding='utf-8'))
     rows = read_trades(book_dir / 'trades.csv')
     trades = pair_trades(rows)
-    value = sum(p['qty'] * closes.get(c, p['avg_price']) for c, p in state['positions'].items())
+    held = list(state['positions'].items()) + list(state.get('manual_positions', {}).items())
+    value = sum(p['qty'] * closes.get(c, p['avg_price']) for c, p in held)
     return dict(spec=spec, state=state, rows=rows, trades=trades, equity=state['cash'] + value)
 
 
