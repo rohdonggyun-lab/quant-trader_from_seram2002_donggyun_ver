@@ -176,3 +176,41 @@ def market(index, logic_name):
     blocks += [F.divider(),
                F.context(f'지금 모의투자 로직 : {logic_name}  ·  백테스트상 이 상황에 가장 나았던 로직 : {BEST_LOGIC[now]}')]
     return f'{title} · {E[now]} {N[now]} ({streak}거래일째)', blocks
+
+
+# ------------------------------------------------------------------ 직접 거래 (한투 앱 등)
+def manual_trades(events):
+    rows = [[('▲' if e['side'] == '매수' else '▼') + e['side'], short(e['name']), f'{e["qty"]:,}주',
+             f'{e["price"]:,.0f}' + ('*' if e.get('estimated') else ''), F.won(e['amount'])] for e in events]
+    title = f'🙋 직접 거래 감지 · {day(datetime.now())} {events[-1]["time"]}'
+    blocks = [F.header(title), F.code(F.table(['구분', '종목', '수량', '단가', '금액'], rows, right={2, 3, 4}))]
+    note = '프로그램이 산 종목이 아니면 프로그램은 팔지 않습니다. 쓴 현금만큼 프로그램이 쓸 돈이 줄어듭니다.'
+    if any(e.get('estimated') for e in events):
+        note = '* 매도 단가는 감지한 때의 현재가로 추정 · ' + note
+    blocks.append(F.context(note))
+    first = events[0]
+    return f'🙋 직접 거래 감지 · {first["name"]} {first["qty"]:,}주 {first["side"]}' + \
+        (f' 외 {len(events) - 1}건' if len(events) > 1 else ''), blocks
+
+
+def manual_summary(events, manual, prices):
+    title = f'🧾 오늘 직접 거래 정리 · {day(datetime.now())}'
+    blocks = [F.header(title)]
+    if events:
+        rows = [[e['time'], ('▲' if e['side'] == '매수' else '▼') + e['side'], short(e['name']), f'{e["qty"]:,}주',
+                 F.won(e['amount'])] for e in events]
+        blocks.append(F.code(F.table(['시각', '구분', '종목', '수량', '금액'], rows, right={3, 4})))
+    else:
+        blocks.append(F.text('오늘 직접 한 거래는 없습니다.'))
+    if manual:
+        rows, cost, value = [], 0.0, 0.0
+        for c, v in manual.items():
+            now = prices.get(c, v['avg_price'])
+            cost += v['avg_price'] * v['qty']
+            value += now * v['qty']
+            rows.append([short(v['name']), f'{v["qty"]:,}', f'{v["avg_price"]:,.0f} → {now:,.0f}',
+                         F.pct(now / v['avg_price'] - 1 if v['avg_price'] else 0)])
+        blocks += [F.divider(), F.text(f'*직접 보유 종목* (프로그램이 관리하지 않음) · 평가 {F.won(value)}  '
+                                       f'({F.signed_pct(value / cost - 1 if cost else 0)})'),
+                   F.code(F.table(['종목', '수량', '매입가 → 현재가', '손익'], rows, right={1, 2, 3}))]
+    return title, blocks

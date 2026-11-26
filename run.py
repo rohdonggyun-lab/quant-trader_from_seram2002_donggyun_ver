@@ -32,6 +32,7 @@ from trader.kis_client import KISClient, KISError  # noqa: E402
 from trader.market_data import NotReady, update, fetch_data, PROBE  # noqa: E402
 from trader.notifier import Notifier              # noqa: E402
 from trader import messages as MSG                # noqa: E402
+from trader.manual_watch import ManualWatch       # noqa: E402
 
 LOCK_PORT = 47285       # 중복 실행 방지용
 LOAD_DAYS = 300         # 계산에 읽는 최근 거래일 수 (모멘텀 최대 250+5일, 여유 포함)
@@ -47,8 +48,16 @@ def fmt(t):
     return f'{t // 100}:{t % 100:02d}'
 
 
+WATCH = None            # 직접 거래 감지 (모의투자 전략이 있을 때). 기다리는 동안 5분마다 확인한다
+
+
 def wait_until(t):
+    last = 0.0
     while hhmm() < t:
+        if (WATCH is not None and not WATCH.paused and config.WATCH_START <= hhmm() < config.WATCH_END
+                and time.time() - last >= config.WATCH_EVERY_MIN * 60):
+            WATCH.tick()
+            last = time.time()
         time.sleep(10)
 
 
@@ -151,15 +160,22 @@ class Runner:
 
     def rebalance_mock(self):
         """15:10 매도 → 15:12 매수 → 15:17 다시 매수 (현재가로 주문)"""
+        if WATCH is not None:                          # 주문 전에 직접 거래를 확인하고, 주문 중에는 멈춘다
+            WATCH.tick()
+            WATCH.paused = True
         self.sell_all({})
         skip = set()
         if self.d['market_ok']:
             wait_until(config.BUY_TIME)
+            self.broker.sync_cash()                    # 매도 대금, 장중 직접 거래를 반영한 실제 현금으로
             self.buy_round({}, skip, config.STOP_TIME)
             if len(self.broker.positions) < self.hold and hhmm() < config.STOP_TIME:
                 wait_until(config.RETRY_TIME)
                 self.buy_round({}, skip, config.STOP_TIME)   # 미체결 종목과 다음 순위 종목을 다시 시도
         self.finish()
+        if WATCH is not None:                          # 프로그램 매매가 끝난 잔고를 새 기준으로
+            WATCH.rebase()
+            WATCH.paused = False
 
     def rebalance_paper(self):
         """15:31 그날 종가로 매도 → 매수"""
@@ -306,6 +322,23 @@ def main():
         r.note.flush()
     runners = [r for r in runners if r.ok]
 
+    global WATCH
+    mock = next((r for r in runners if r.mock), None)
+    if mock is not None:
+        WATCH = ManualWatch(client, mock.broker, mock.note)
+        if hhmm() >= config.WATCH_START:
+            WATCH.tick()
+    trade_day(client, runners)
+    if WATCH is not None and hhmm() < config.WATCH_END:  # 교체가 없는 날도 장 마감까지 직접 거래를 지켜본다
+        runners[0].note.log(f'{fmt(config.WATCH_END)}까지 직접 거래를 지켜봅니다 ({config.WATCH_EVERY_MIN}분마다).')
+        wait_until(config.WATCH_END)
+    if WATCH is not None:
+        WATCH.tick()
+        WATCH.summary()
+
+
+def trade_day(client, runners):
+    """시세 받기 → 시장 상황 → 교체 (교체가 없으면 보유 현황만)"""
     if not get_data(client, [r.note for r in runners], wait=True):
         for r in runners:
             r.note.flush('오늘은 교체하지 않습니다.')

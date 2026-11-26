@@ -167,10 +167,12 @@ class MockBroker(Ledger):
                 p['qty'] = held[code]['qty']
         self.save()
         others = [f'{v["name"]}({c}) {v["qty"]:,}주' for c, v in held.items() if c not in self.positions]
-        if others:
-            self.note.warn('이 프로그램이 사지 않은 종목이 계좌에 있습니다 (건드리지 않음) : '
-                           + ', '.join(others))
-        # 현금은 계좌 기준으로 맞춘다 (수수료·세금 추정치와 실제의 차이를 매일 바로잡음)
+        if others:                                  # 직접 산 종목: 직접 거래 알림이 따로 알린다
+            self.note.log('이 프로그램이 사지 않은 종목 (건드리지 않음) : ' + ', '.join(others))
+        self.sync_cash()
+
+    def sync_cash(self):
+        """현금은 계좌 기준으로 맞춘다 (수수료·세금 추정 차이, 직접 거래로 쓴 돈을 반영)"""
         account_cash = self.client.get_buyable_cash()
         gap = account_cash - self.state['cash']
         if gap:
